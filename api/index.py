@@ -1,28 +1,28 @@
 import asyncio
-import re
-import time
 import os
 import json
+import time
+import re
 from pyrogram import Client
-from pyrogram.errors import FloodWait, SessionPasswordNeeded
+from pyrogram.errors import FloodWait
 
-# Telegram credentials from environment variables
+# Environment variables
 API_ID = int(os.environ.get("API_ID", "29969433"))
 API_HASH = os.environ.get("API_HASH", "884f9ffa4e8ece099cccccade82effac")
 PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "+919214045762")
 TARGET_BOT = os.environ.get("TARGET_BOT", "@telebrecheddb_bot")
 
-# Global client variable
-app = None
+# Telegram client
+tg_client = None
 
-# Initialize Telegram client
-async def initialize_client():
-    global app
+async def get_telegram_client():
+    """Initialize Telegram client"""
+    global tg_client
     
-    if app is None:
-        print("Initializing Telegram client...")
-        app = Client(
-            "my_account",
+    if tg_client is None:
+        print("Creating new Telegram client...")
+        tg_client = Client(
+            "vercel_session",
             api_id=API_ID,
             api_hash=API_HASH,
             phone_number=PHONE_NUMBER,
@@ -31,23 +31,29 @@ async def initialize_client():
         )
         
         try:
-            await app.start()
+            await tg_client.start()
             print("Telegram client started successfully")
-        except SessionPasswordNeeded:
-            # If 2FA is enabled
-            print("2FA password required")
-            # For now, we'll skip 2FA in serverless
-            raise Exception("Two-step verification is enabled. Please disable it temporarily.")
+            
+            # Send test message to verify connection
+            me = await tg_client.get_me()
+            print(f"Logged in as: {me.first_name} (@{me.username})")
+            
         except Exception as e:
-            print(f"Failed to start client: {str(e)}")
+            print(f"Failed to start client: {e}")
+            tg_client = None
             raise
     
-    return app
+    return tg_client
 
-# Parse bot response
-def parse_response(text):
+def parse_bot_response(text):
+    """Parse bot response"""
     if not text:
-        return {"success": False, "error": "Empty response from bot"}
+        return {"success": False, "error": "Empty response"}
+    
+    # Replace Russian text
+    text = text.replace("Телефон", "Phone") \
+               .replace("История изменения имени", "Name change history") \
+               .replace("Интересовались этим", "Viewed by")
     
     result = {
         "success": True,
@@ -58,144 +64,157 @@ def parse_response(text):
         "name_history": []
     }
     
-    try:
-        # Extract username
-        username_match = re.search(r"t\.me/([a-zA-Z0-9_]+)", text)
-        if username_match:
-            result["username"] = username_match.group(1)
-        
-        # Extract ID
-        id_match = re.search(r"ID[:：]\s*(\d+)", text)
-        if id_match:
-            result["id"] = id_match.group(1)
-        
-        # Extract phone
-        phone_match = re.search(r"Phone[:：]\s*(\d+)", text)
-        if phone_match:
-            result["phone"] = phone_match.group(1)
-        
-        # Extract viewed by
-        viewed_match = re.search(r"Viewed by[:：]\s*(\d+)", text)
-        if viewed_match:
-            result["viewed_by"] = viewed_match.group(1)
-        
-        # Extract history
-        history_pattern = r"(\d{2}\.\d{2}\.\d{4})\s*→\s*@([a-zA-Z0-9_]+)[,，]\s*([^→\n]+)"
-        history_matches = re.findall(history_pattern, text)
-        
-        for date, username, info in history_matches:
-            ids = re.findall(r"\d+", info)
-            result["name_history"].append({
-                "date": date,
-                "username": username,
-                "id": ids[0] if ids else None
-            })
-            
-    except Exception as e:
-        result["success"] = False
-        result["error"] = f"Parsing error: {str(e)}"
+    # Extract username
+    username_match = re.search(r"t\.me/([a-zA-Z0-9_]+)", text)
+    if username_match:
+        result["username"] = username_match.group(1)
+    
+    # Extract ID
+    id_match = re.search(r"ID[:：]\s*(\d+)", text)
+    if id_match:
+        result["id"] = id_match.group(1)
+    
+    # Extract phone
+    phone_match = re.search(r"Phone[:：]\s*(\d+)", text)
+    if phone_match:
+        result["phone"] = phone_match.group(1)
+    
+    # Extract viewed by
+    viewed_match = re.search(r"Viewed by[:：]\s*(\d+)", text)
+    if viewed_match:
+        result["viewed_by"] = viewed_match.group(1)
+    
+    # Extract history
+    history_matches = re.findall(r"(\d{2}\.\d{2}\.\d{4})\s*→\s*@([a-zA-Z0-9_]+)[,，]\s*([^→\n]+)", text)
+    for date, username, info in history_matches:
+        ids = re.findall(r"\d+", info)
+        result["name_history"].append({
+            "date": date,
+            "username": username,
+            "id": ids[0] if ids else None
+        })
     
     return result
 
-# Main function to get user info
-async def get_user_info(username):
-    if not username:
-        return {"success": False, "error": "Username is required"}
-    
-    # Clean username
-    username = username.strip().lstrip('@')
-    
+async def get_user_info_from_bot(username):
+    """Get user info from Telegram bot"""
     try:
+        # Clean username
+        username = username.strip().lstrip('@')
+        
         # Get client
-        client = await initialize_client()
+        client = await get_telegram_client()
         
         # Send message to bot
-        sent_message = await client.send_message(TARGET_BOT, f"t.me/{username}")
+        message = f"t.me/{username}"
+        sent = await client.send_message(TARGET_BOT, message)
         
-        # Wait for response
+        # Wait for response (max 30 seconds)
         response = None
-        timeout = 30  # seconds
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            async for message in client.get_chat_history(TARGET_BOT, limit=10):
-                if (message.id > sent_message.id and 
-                    not message.outgoing and 
-                    message.text and 
-                    "t.me" in message.text):
-                    response = message.text
-                    break
+        for _ in range(15):  # 15 * 2 = 30 seconds
+            async for msg in client.get_chat_history(TARGET_BOT, limit=5):
+                if msg.id > sent.id and not msg.outgoing and msg.text:
+                    if "t.me" in msg.text or "ID" in msg.text:
+                        response = msg.text
+                        break
             
             if response:
                 break
-            
             await asyncio.sleep(2)
         
         if not response:
-            return {"success": False, "error": "Bot did not respond within timeout"}
+            return {"success": False, "error": "No response from bot"}
         
         # Parse response
-        return parse_response(response)
+        return parse_bot_response(response)
         
     except FloodWait as e:
-        return {"success": False, "error": f"Flood wait: {e.value} seconds"}
+        return {"success": False, "error": f"Please wait {e.value} seconds"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
-# Vercel serverless handler
-async def main(request):
-    from urllib.parse import parse_qs
+# VERCEL SERVERLESS FUNCTION
+def handler(event, context):
+    """Main handler for Vercel"""
     
+    # Parse request
     try:
         # Get query parameters
-        query_string = request.get("query", {})
-        username = query_string.get("username", [""])[0]
+        query = event.get('queryStringParameters', {}) or {}
+        username = query.get('username', '')
         
-        if not username:
-            return {
-                "statusCode": 400,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({
-                    "success": False,
-                    "error": "Please provide username parameter: ?username=@example"
-                })
+        # Get path
+        path = event.get('path', '/')
+        
+        # Handle different routes
+        if path == '/' or path == '':
+            # Home page
+            if username:
+                # Get user info
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(get_user_info_from_bot(username))
+                loop.close()
+            else:
+                # Show instructions
+                result = {
+                    "success": True,
+                    "message": "Telegram User Info API",
+                    "usage": "Add ?username=@example to URL",
+                    "example": "https://user-to-5trud8t4y-samth3792-uis-projects.vercel.app/?username=@telegram",
+                    "endpoints": {
+                        "check_user": "/?username=@username",
+                        "health": "/health"
+                    }
+                }
+        
+        elif path == '/health':
+            # Health check
+            result = {
+                "success": True,
+                "status": "online",
+                "timestamp": time.time()
             }
         
-        # Get user info
-        result = await get_user_info(username)
+        else:
+            # 404
+            result = {
+                "success": False,
+                "error": "Endpoint not found",
+                "available_endpoints": ["/", "/health"]
+            }
         
+        # Return response
         return {
-            "statusCode": 200 if result["success"] else 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps(result, indent=2)
+            'statusCode': 200 if result.get('success', False) else 400,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            'body': json.dumps(result, indent=2)
         }
         
     except Exception as e:
+        # Error response
         return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
                 "success": False,
-                "error": f"Server error: {str(e)}"
-            })
+                "error": str(e),
+                "note": "Check Vercel environment variables"
+            }, indent=2)
         }
 
-# For Vercel
-def handler(request, context):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    result = loop.run_until_complete(main(request))
-    loop.close()
-    return result
-
-# For local testing
+# Local testing
 if __name__ == "__main__":
-    # Simple test
-    async def test():
-        import sys
-        username = sys.argv[1] if len(sys.argv) > 1 else "@telegram"
-        print(f"Testing with username: {username}")
-        result = await get_user_info(username)
-        print(json.dumps(result, indent=2))
+    # Test the handler
+    test_event = {
+        'path': '/',
+        'queryStringParameters': {'username': '@telegram'}
+    }
     
-    asyncio.run(test())
+    print("Testing API...")
+    result = handler(test_event, None)
+    print("Status Code:", result['statusCode'])
+    print("Response:", result['body'])
